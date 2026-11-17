@@ -1,0 +1,175 @@
+## Imported all library 
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import math
+from copy import deepcopy
+from scipy.stats import norm
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm  # Color Map 
+
+## Downloaded Data
+ticker = "RELIANCE.NS"
+stock = yf.Ticker(ticker)
+data =stock.history(period="3mo")
+data.head(10)
+
+
+## Calculated Parameters
+clean_returns  = data["Close"].pct_change().dropna()
+data["log_returns"] = np.log(data["Close"]/data["Close"].shift(1))
+dailystd = data["log_returns"].std()
+annualstd = dailystd * np.sqrt(252)
+skewness = data["log_returns"].skew()
+kurtosis = data["log_returns"].kurtosis()
+summary_stats = pd.DataFrame({
+    "metric" : ["annualstd", "skewness", "kurtosis", "Mean Daily Return"],
+    "Value": [
+        f"{annualstd:.4%}",
+        f"{skewness:.4f}",
+        f"{kurtosis:.4f}",
+        f"{clean_returns.mean():.4%}"
+    ]
+})
+summary_stats
+
+
+
+## Ploted Diagram
+import matplotlib.pyplot as plt 
+
+plt.figure(figsize=(12,5))
+
+plt.subplot(1,2,1)
+plt.plot(data.index, data["Close"], label = "Close Price", color = "blue")
+plt.title(f"{ticker} - Daily Closing Price")
+plt.xlabel("Date")
+plt.ylabel("Price(INR]")
+plt.grid(True, linestyle = "--", alpha = 0.6)
+plt.legend()
+
+
+plt.subplot(1,2,2)
+plt.hist(clean_returns, color = "purple", edgecolor = "black", alpha = 0.7, bins = 20)
+plt.title(f"{ticker} - Daily Returns of stocks")
+plt.xlabel("Daily Returns")
+plt.ylabel("Frequency")
+plt.grid(True, linestyle = "--", alpha =0.6)
+plt.axvline(0, color = "red", linestyle = "--", linewidth=1)
+
+
+plt.tight_layout()
+plt.show()
+
+
+## Black Scholes Merton Model 
+S = data["Close"][-1]
+r = 0.0545
+sigma = annualstd
+maturities_days = [30,60,90]
+maturities = [ d/365.0  for d in maturities_days]
+strikes = [S*0.95, S*0.98,S, S*1.02, S*1.05]
+
+
+import math
+def bsm_d1_d2(S,K,T,r,sigma):
+  d1 = (math.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma * math.sqrt(T))
+  d2 = d1 - sigma * math.sqrt(T)
+  return d1,d2
+
+def bsm_price(S,K,T,r, sigma, option_type):
+  d1, d2 = bsm_d1_d2(S,K,T,r,sigma)
+  if option_type == "call":
+    return S*norm.cdf(d1) - K*math.exp(-r*T)*norm.cdf(d2)
+  else:
+    return -S*norm.cdf(-d1) + K*math.exp(-r*T)*norm.cdf(-d2)
+
+
+rows = []
+
+for K in strikes:
+  for d,T in zip(maturities_days, maturities):
+    call_price=bsm_price(S,K,T,r,sigma, 'call')
+    put_price=bsm_price(S,K,T,r,sigma,'put')
+  rows.append({
+      'Spot': S,
+      'Sigma_annual': sigma,
+      'r_annual': r,
+      'Strike': K,
+      'Maturity_days': d,
+      'Maturity_years': round(T,4),
+      'Type': 'Put',
+      'Price': round(put_price, 4),})
+  rows.append({
+      'Spot': S,
+      'Sigma_annual': sigma,
+      'r_annual': r,
+      'Strike': K,
+      'Maturity_days': d,
+      'Maturity_years': round(T,4),
+      'Type': 'Call',
+      'Price': round(call_price, 4)})
+      
+
+
+
+options_df = pd.DataFrame(rows)
+options_df.to_csv("Option_price_csv", index=False)
+
+
+
+## Option Greek 
+S = data["Close"]
+import math
+from scipy.stats import norm
+
+def _bsm_d1_d2(S,K,T,r,sigma):
+  if T <= 0 or sigma <= 0:
+    return (float("inf") if S>K else -float("inf")),  (float("inf") if S>K else float("inf"))
+
+  part = sigma * math.sqrt(T)
+  d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / part
+  d2 = d1 - part
+  return d1, d2
+
+
+def bsm_price(S, K, r, sigma, T, option_type='call'):
+    d1, d2 = _bsm_d1_d2(S, K, r, sigma, T)
+    if str(option_type).lower().startswith('c'):
+        return S * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
+    else:
+        return K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
+def greek_delta(S, K, r, sigma, T, option_type='call'):
+    d1, _ = _bsm_d1_d2(S, K, r, sigma, T)
+    return norm.cdf(d1) if str(option_type).lower().startswith('c') else (norm.cdf(d1) - 1.0)
+
+def greek_gamma(S, K, r, sigma, T):
+    d1, _ = _bsm_d1_d2(S, K, r, sigma, T)
+    denom = S * sigma * math.sqrt(T) if (S > 0 and sigma > 0 and T > 0) else float('inf')
+    return norm.pdf(d1) / denom
+
+def greek_vega(S, K, r, sigma, T):
+    d1, _ = _bsm_d1_d2(S, K, r, sigma, T)
+    return S * norm.pdf(d1) * math.sqrt(T)   # per unit vol
+
+def greek_theta_per_day(S, K, r, sigma, T, option_type='call', days_in_year=365.0):
+    d1, d2 = _bsm_d1_d2(S, K, r, sigma, T)
+    if T <= 0:
+        return 0.0
+    first = - (S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T))
+    if str(option_type).lower().startswith('c'):
+        second = - r * K * math.exp(-r * T) * norm.cdf(d2)
+    else:
+        second = r * K * math.exp(-r * T) * norm.cdf(-d2)
+    theta_annual = first + second
+    return theta_annual / days_in_year
+
+def greek_rho(S, K, r, sigma, T, option_type='call'):
+    d1, d2 = _bsm_d1_d2(S, K, r, sigma, T)
+    if str(option_type).lower().startswith('c'):
+        return K * T * math.exp(-r * T) * norm.cdf(d2)
+    else:
+        return -K * T * math.exp(-r * T) * norm.cdf(-d2)
